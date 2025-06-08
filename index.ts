@@ -1,244 +1,138 @@
 #!/usr/bin/env node
-
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+import http from 'http';
+import { URL } from 'url';
 import fetch from 'node-fetch';
 
-// Strava API configuration
-const STRAVA_BASE_URL = 'https://www.strava.com/api/v3';
+const STRAVA_TOKEN = process.env.STRAVA_ACCESS_TOKEN ?? '';
+if (!STRAVA_TOKEN) throw new Error('Missing STRAVA_ACCESS_TOKEN');
 
-class StravaServer {
-  private server: Server;
-  private accessToken: string;
+const PORT = process.env.PORT || 8080;
 
-  constructor() {
-    this.server = new Server(
-      {
-        name: 'strava-mcp-server',
-        version: '0.1.0',
-      },
-      {
-        capabilities: {
-          tools: {},
-        },
-      }
-    );
-
-    // Get access token from environment variable
-    this.accessToken = process.env.STRAVA_ACCESS_TOKEN || '';
-    
-    if (!this.accessToken) {
-      console.error('STRAVA_ACCESS_TOKEN environment variable is required');
-      process.exit(1);
-    }
-
-    this.setupToolHandlers();
-  }
-
-  private setupToolHandlers() {
-    // List available tools
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
-      return {
-        tools: [
-          {
-            name: 'get_athlete_profile',
-            description: 'Get the authenticated athlete\'s profile information',
-            inputSchema: {
-              type: 'object',
-              properties: {},
-            },
-          },
-          {
-            name: 'get_athlete_activities',
-            description: 'Get the authenticated athlete\'s activities',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                before: {
-                  type: 'integer',
-                  description: 'Unix timestamp to get activities before',
-                },
-                after: {
-                  type: 'integer',
-                  description: 'Unix timestamp to get activities after',
-                },
-                page: {
-                  type: 'integer',
-                  description: 'Page number (default: 1)',
-                },
-                per_page: {
-                  type: 'integer',
-                  description: 'Number of activities per page (default: 30, max: 200)',
-                },
-              },
-            },
-          },
-          {
-            name: 'get_activity_details',
-            description: 'Get detailed information about a specific activity',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                activity_id: {
-                  type: 'string',
-                  description: 'The ID of the activity',
-                },
-              },
-              required: ['activity_id'],
-            },
-          },
-          {
-            name: 'get_athlete_stats',
-            description: 'Get the authenticated athlete\'s statistics',
-            inputSchema: {
-              type: 'object',
-              properties: {
-                athlete_id: {
-                  type: 'string',
-                  description: 'The ID of the athlete (use current athlete if not provided)',
-                },
-              },
-            },
-          },
-        ],
-      };
-    });
-
-    // Handle tool calls
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const { name, arguments: args } = request.params;
-
+// Helper to parse JSON from request
+function parseBody(req: http.IncomingMessage): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', () => {
       try {
-        switch (name) {
-          case 'get_athlete_profile':
-            return await this.getAthleteProfile();
-          
-          case 'get_athlete_activities':
-            return await this.getAthleteActivities(args);
-          
-          case 'get_activity_details':
-            return await this.getActivityDetails(args.activity_id);
-          
-          case 'get_athlete_stats':
-            return await this.getAthleteStats(args.athlete_id);
-          
-          default:
-            throw new Error(`Unknown tool: ${name}`);
-        }
-      } catch (error) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
-            },
-          ],
-        };
+        resolve(body ? JSON.parse(body) : {});
+      } catch (e) {
+        resolve({});
       }
     });
-  }
-
-  private async makeStravaRequest(endpoint: string, params?: Record<string, any>) {
-    const url = new URL(`${STRAVA_BASE_URL}${endpoint}`);
-    
-    if (params) {
-      Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined && value !== null) {
-          url.searchParams.append(key, value.toString());
-        }
-      });
-    }
-
-    const response = await fetch(url.toString(), {
-      headers: {
-        'Authorization': `Bearer ${this.accessToken}`,
-        'Accept': 'application/json',
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`Strava API error: ${response.status} ${response.statusText}`);
-    }
-
-    return await response.json();
-  }
-
-  private async getAthleteProfile() {
-    const data = await this.makeStravaRequest('/athlete');
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async getAthleteActivities(args: any = {}) {
-    const params = {
-      before: args.before,
-      after: args.after,
-      page: args.page || 1,
-      per_page: args.per_page || 30,
-    };
-
-    const data = await this.makeStravaRequest('/athlete/activities', params);
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async getActivityDetails(activityId: string) {
-    const data = await this.makeStravaRequest(`/activities/${activityId}`);
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
-    };
-  }
-
-  private async getAthleteStats(athleteId?: string) {
-    // If no athlete ID provided, get current athlete first
-    if (!athleteId) {
-      const athlete = await this.makeStravaRequest('/athlete');
-      athleteId = athlete.id.toString();
-    }
-
-    const data = await this.makeStravaRequest(`/athletes/${athleteId}/stats`);
-    
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(data, null, 2),
-        },
-      ],
-    };
-  }
-
-  async run() {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error('Strava MCP server running on stdio');
-  }
+    req.on('error', reject);
+  });
 }
 
-// Start the server
-const server = new StravaServer();
-server.run().catch(console.error);
+// Helper to send JSON response
+function sendJson(res: http.ServerResponse, data: any, status = 200) {
+  res.writeHead(status, { 
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  });
+  res.end(JSON.stringify(data));
+}
+
+// Main server
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url || '', `http://localhost:${PORT}`);
+  const method = req.method;
+  const pathname = url.pathname;
+
+  // Handle CORS preflight
+  if (method === 'OPTIONS') {
+    sendJson(res, {});
+    return;
+  }
+
+  try {
+    // Root endpoint - health check
+    if (pathname === '/' && method === 'GET') {
+      sendJson(res, {
+        status: 'ok',
+        service: 'Strava MCP Server',
+        version: '0.2.0',
+        endpoints: {
+          health: '/',
+          tools: '/mcp/tools',
+          execute: '/mcp/tools/:toolName'
+        }
+      });
+      return;
+    }
+
+    // List tools endpoint
+    if (pathname === '/mcp/tools' && method === 'GET') {
+      sendJson(res, {
+        tools: [
+          {
+            name: 'get-athlete',
+            description: 'Return authenticated athlete profile',
+            method: 'POST',
+            endpoint: '/mcp/tools/get-athlete'
+          },
+          {
+            name: 'list-activities',
+            description: 'List recent activities',
+            method: 'POST',
+            endpoint: '/mcp/tools/list-activities',
+            parameters: {
+              per_page: { type: 'number', optional: true, default: 10 }
+            }
+          }
+        ]
+      });
+      return;
+    }
+
+    // Tool execution endpoints
+    if (pathname.startsWith('/mcp/tools/') && method === 'POST') {
+      const toolName = pathname.split('/')[3];
+      const body = await parseBody(req);
+
+      let result;
+      switch (toolName) {
+        case 'get-athlete':
+          result = await callStrava('/athlete');
+          break;
+        case 'list-activities':
+          const perPage = body.per_page || 10;
+          result = await callStrava(`/athlete/activities?per_page=${perPage}`);
+          break;
+        default:
+          sendJson(res, { error: `Unknown tool: ${toolName}` }, 404);
+          return;
+      }
+
+      sendJson(res, { result });
+      return;
+    }
+
+    // Default 404
+    sendJson(res, { error: 'Not found' }, 404);
+
+  } catch (error) {
+    console.error('Server error:', error);
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    sendJson(res, { error: errorMessage }, 500);
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`Strava MCP Server running on port ${PORT}`);
+  console.log(`Available endpoints:`);
+  console.log(`  GET  / - Health check`);
+  console.log(`  GET  /mcp/tools - List tools`);
+  console.log(`  POST /mcp/tools/get-athlete - Get athlete profile`);
+  console.log(`  POST /mcp/tools/list-activities - List activities`);
+});
+
+async function callStrava(path: string) {
+  const r = await fetch(`https://www.strava.com/api/v3${path}`, {
+    headers: { Authorization: `Bearer ${STRAVA_TOKEN}` },
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
